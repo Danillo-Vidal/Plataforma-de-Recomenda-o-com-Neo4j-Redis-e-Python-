@@ -4,6 +4,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from neo4j import GraphDatabase
 from datetime import date
+from pydantic import BaseModel, field_validator
+from app.config import NEO4J_DATABASE
+
 
 load_dotenv()  # carrega o .env pro ambiente
 
@@ -22,8 +25,26 @@ class Usuario(BaseModel):
     id: int
     nome: str
     email: str
-    idade: int
+    data_nascimento: date
 
+    @field_validator("data_nascimento")
+    @classmethod
+    def nao_pode_ser_futura(cls, v):
+        if v > date.today():
+            raise ValueError("Data de nascimento no futuro")
+        return v
+
+class UsuarioUpdate(BaseModel):
+    nome: str
+    email: str
+    data_nascimento: date
+
+    @field_validator("data_nascimento")
+    @classmethod
+    def nao_pode_ser_futura(cls, v):
+        if v > date.today():
+            raise ValueError("Data de nascimento no futuro")
+        return v
 
 class Filme(BaseModel):
     id: int
@@ -37,6 +58,11 @@ class FilmeUpdate(BaseModel):
 class Genero(BaseModel):
     id: int
     nome: str
+
+class FilmeGenero(BaseModel):
+    filme_id: int
+    genero_id: int
+
 
 
 class Assistiu(BaseModel):
@@ -56,16 +82,46 @@ class Avaliou(BaseModel):
 @app.post("/usuarios")
 def criar_usuario(usuario: Usuario):
     with driver.session() as session:
+        existe = session.run(
+            "MATCH (u:Usuario {id: $id}) RETURN u",
+            id=usuario.id
+        ).single()
+
+        if existe:
+            raise HTTPException(status_code=409, detail="Usuário já existe. Use PUT /usuarios/{id} para atualizar.")
+
         session.run(
             """
-            MERGE (u:Usuario {id: $id})
-            ON CREATE SET u.nome = $nome, u.email = $email, u.idade = $idade
-            ON MATCH SET u.nome = $nome, u.email = $email, u.idade = $idade
+            CREATE (u:Usuario {
+                id: $id, nome: $nome, email: $email,
+                data_nascimento: date($data_nascimento)
+            })
             """,
-            id=usuario.id, nome=usuario.nome, email=usuario.email, idade=usuario.idade
+            id=usuario.id, nome=usuario.nome, email=usuario.email,
+            data_nascimento=usuario.data_nascimento.isoformat()
         )
-    return {"status": "criado ou atualizado", "usuario": usuario}
+    return {"status": "criado", "usuario": usuario}
 
+
+#---- Atualizar usuário ---
+@app.put("/usuarios/{usuario_id}")
+def atualizar_usuario(usuario_id: int, usuario: UsuarioUpdate):
+    with driver.session() as session:
+        resultado = session.run(
+            """
+            MATCH (u:Usuario {id: $usuario_id})
+            SET u.nome = $nome, u.email = $email, u.data_nascimento = date($data_nascimento)
+            RETURN u.id AS id, u.nome AS nome, u.email AS email, u.data_nascimento AS data_nascimento
+            """,
+            usuario_id=usuario_id, nome=usuario.nome, email=usuario.email,
+            data_nascimento=usuario.data_nascimento.isoformat()
+        )
+        registro = resultado.single()
+
+    if not registro:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+
+    return {"status": "atualizado", "usuario": dict(registro)}
 
 # --- Cadastro de filme ---
 @app.post("/filmes")
@@ -133,6 +189,27 @@ def criar_genero(genero: Genero):
     return {"status": "criado", "genero": genero}
 
 
+#----Associar genero a filme---
+@app.post("/filmes/{filme_id}/generos/{genero_id}")
+def associar_genero(filme_id: int, genero_id: int):
+    with driver.session() as session:
+        resultado = session.run(
+            """
+            MATCH (f:Filme {id: $filme_id})
+            MATCH (g:Genero {id: $genero_id})
+            MERGE (f)-[:PERTENCE_A]->(g)
+            RETURN f.nome AS filme, g.nome AS genero
+            """,
+            filme_id=filme_id, genero_id=genero_id
+        )
+        registro = resultado.single()
+
+    if not registro:
+        raise HTTPException(status_code=404, detail="Filme ou gênero não encontrado")
+
+    return {"status": "associado", "filme": registro["filme"], "genero": registro["genero"]}
+
+
 # --- Registrar filme assistido ---
 @app.post("/assistidos")
 def registrar_assistido(registro: Assistiu):
@@ -161,7 +238,7 @@ def registrar_assistido(registro: Assistiu):
 def registrar_avaliacao(registro: Avaliou):
     data_registro = registro.data or date.today().isoformat()
 
-    if not (0 <= registro.nota <= 5):
+    if not (0 <= registro.nota <= 10):
         raise HTTPException(status_code=400, detail="Nota deve estar entre 0 e 5")
 
     with driver.session() as session:
@@ -188,6 +265,32 @@ def registrar_avaliacao(registro: Avaliou):
         "filme": registro_criado["filme"],
         "nota": registro_criado["nota"]
     }
+#--Gerar recomendações de filmes para um usuário com base em avaliações de outros usuários---
+@app.get("/recomendacoes/{usuario_id}")
+def recomendar(usuario_id: int):
+    query = """
+    MATCH (u:Usuario {id: $usuario_id})-[r:AVALIOU]->(:Filme)-[:PERTENCE_A]->(g:Genero)
+    WHERE r.nota >= 7
+    WITH u, g, avg(r.nota) AS media
+    ORDER BY media DESC
+    LIMIT 3
+    MATCH (g)<-[:PERTENCE_A]-(rec:Filme)
+    WHERE NOT (u)-[:ASSISTIU]->(rec)
+      AND NOT (u)-[:AVALIOU]->(rec)
+    RETURN rec.id AS id, rec.nome AS nome,
+           collect(DISTINCT g.nome) AS generos,
+           sum(media) AS score
+    ORDER BY score DESC
+    LIMIT 10
+    """
+    with driver.session(database=NEO4J_DATABASE) as session:
+        result = session.run(query, usuario_id=usuario_id)
+        recomendacoes = [r.data() for r in result]
+
+    if not recomendacoes:
+        return {"usuario_id": usuario_id, "recomendacoes": [], "mensagem": "Sem recomendações no momento"}
+
+    return {"usuario_id": usuario_id, "recomendacoes": recomendacoes}
 
 
 @app.on_event("shutdown")
