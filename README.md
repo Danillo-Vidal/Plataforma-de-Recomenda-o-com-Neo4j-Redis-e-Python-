@@ -127,5 +127,5 @@ Acesse `http://127.0.0.1:8000/docs` pra ver e testar os endpoints (Swagger).
 - [x] Endpoints de cadastro (usuário, filme, gênero)
 - [x] Endpoints de registro (assistiu, avaliou)
 - [x] Endpoint de recomendação
-- [ ] Cache no Redis (TTL, HIT/MISS, invalidação)
-- [ ] Testes de desempenho
+- [x] Cache no Redis (TTL, HIT/MISS, invalidação)
+- [x] Testes de desempenho
