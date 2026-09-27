@@ -125,7 +125,7 @@ Acesse `http://127.0.0.1:8000/docs` pra ver e testar os endpoints (Swagger).
 - [x] Modelagem do grafo no Neo4j
 - [x] Conexão Python + FastAPI + Neo4j + Redis
 - [x] Endpoints de cadastro (usuário, filme, gênero)
-- [ ] Endpoints de registro (assistiu, avaliou)
-- [ ] Endpoint de recomendação
+- [x] Endpoints de registro (assistiu, avaliou)
+- [x] Endpoint de recomendação
 - [ ] Cache no Redis (TTL, HIT/MISS, invalidação)
 - [ ] Testes de desempenho
