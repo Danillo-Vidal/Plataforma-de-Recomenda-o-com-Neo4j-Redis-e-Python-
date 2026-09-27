@@ -5,17 +5,10 @@ from pydantic import BaseModel
 from neo4j import GraphDatabase
 from datetime import date
 from pydantic import BaseModel, field_validator
-from app.config import NEO4J_DATABASE
-
+from app.cache import obter_cache, salvar_cache, invalidar_cache
+from app.database import get_session, close_driver
 
 load_dotenv()  # carrega o .env pro ambiente
-
-# --- Configuração da conexão com o Neo4j Aura ---
-NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_USER = os.getenv("NEO4J_USER")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
-
-driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
 app = FastAPI(title="API de Recomendação")
 
@@ -81,7 +74,7 @@ class Avaliou(BaseModel):
 # --- Cadastro de usuário ---
 @app.post("/usuarios")
 def criar_usuario(usuario: Usuario):
-    with driver.session() as session:
+    with get_session() as session:
         existe = session.run(
             "MATCH (u:Usuario {id: $id}) RETURN u",
             id=usuario.id
@@ -106,7 +99,7 @@ def criar_usuario(usuario: Usuario):
 #---- Atualizar usuário ---
 @app.put("/usuarios/{usuario_id}")
 def atualizar_usuario(usuario_id: int, usuario: UsuarioUpdate):
-    with driver.session() as session:
+    with get_session() as session:
         resultado = session.run(
             """
             MATCH (u:Usuario {id: $usuario_id})
@@ -126,7 +119,7 @@ def atualizar_usuario(usuario_id: int, usuario: UsuarioUpdate):
 # --- Cadastro de filme ---
 @app.post("/filmes")
 def criar_filme(filme: Filme):
-    with driver.session() as session:
+    with get_session() as session:
         session.run(
             """
             MERGE (f:Filme {id: $id})
@@ -140,7 +133,7 @@ def criar_filme(filme: Filme):
 # --- Atualizar filme ---
 @app.put("/filmes/{filme_id}")
 def atualizar_filme(filme_id: int, filme: FilmeUpdate):
-    with driver.session() as session:
+    with get_session() as session:
         resultado = session.run(
             """
             MATCH (f:Filme {id: $filme_id})
@@ -159,7 +152,7 @@ def atualizar_filme(filme_id: int, filme: FilmeUpdate):
 # --- Deletar filme ---
 @app.delete("/filmes/{filme_id}")
 def deletar_filme(filme_id: int):
-    with driver.session() as session:
+    with get_session() as session:
         resultado = session.run(
             """
             MATCH (f:Filme {id: $filme_id})
@@ -178,7 +171,7 @@ def deletar_filme(filme_id: int):
 # --- Cadastro de gênero ---
 @app.post("/generos")
 def criar_genero(genero: Genero):
-    with driver.session() as session:
+    with get_session() as session:
         session.run(
             """
             MERGE (g:Genero {id: $id})
@@ -192,7 +185,7 @@ def criar_genero(genero: Genero):
 #----Associar genero a filme---
 @app.post("/filmes/{filme_id}/generos/{genero_id}")
 def associar_genero(filme_id: int, genero_id: int):
-    with driver.session() as session:
+    with get_session() as session:
         resultado = session.run(
             """
             MATCH (f:Filme {id: $filme_id})
@@ -215,7 +208,7 @@ def associar_genero(filme_id: int, genero_id: int):
 def registrar_assistido(registro: Assistiu):
     data_registro = registro.data or date.today().isoformat()
 
-    with driver.session() as session:
+    with get_session() as session:
         resultado = session.run(
             """
             MATCH (u:Usuario {id: $usuario_id})
@@ -241,7 +234,7 @@ def registrar_avaliacao(registro: Avaliou):
     if not (0 <= registro.nota <= 10):
         raise HTTPException(status_code=400, detail="Nota deve estar entre 0 e 10")
 
-    with driver.session() as session:
+    with get_session() as session:
         resultado = session.run(
             """
             MATCH (u:Usuario {id: $usuario_id})
@@ -270,6 +263,15 @@ def registrar_avaliacao(registro: Avaliou):
 #--Gerar recomendações de filmes para um usuário com base em avaliações de outros usuários---
 @app.get("/recomendacoes/{usuario_id}")
 def recomendar(usuario_id: int):
+    cache_key = f"recomendacao:{usuario_id}"
+
+    cache = obter_cache(cache_key)
+    if cache is not None:
+        return {
+            "usuario_id": usuario_id,
+            "origem": "CACHE HIT",
+            "recomendacoes": cache
+        }
     query = """
     MATCH (u:Usuario {id: $usuario_id})-[r:AVALIOU]->(f:Filme)
     WITH u, f, r.nota AS nota
@@ -280,16 +282,35 @@ def recomendar(usuario_id: int):
     WHERE NOT (u)-[:ASSISTIU]->(recomendado)
     RETURN recomendado.nome AS titulo, g.nome AS genero, recomendado.ano AS ano
     """
-    with driver.session() as session:
+    with get_session() as session:
         result = session.run(query, usuario_id=usuario_id)
         recomendacoes = [r.data() for r in result]
 
+    salvar_cache(cache_key, recomendacoes)
+
     if not recomendacoes:
-        return {"usuario_id": usuario_id, "recomendacoes": [], "mensagem": "Sem recomendações no momento"}
+        return {
+            "usuario_id": usuario_id,
+            "origem": "CACHE MISS",
+            "recomendacoes": [],
+            "mensagem": "Sem recomendações no momento"
+        }
 
-    return {"usuario_id": usuario_id, "recomendacoes": recomendacoes}
+    return {
+        "usuario_id": usuario_id,
+        "origem": "CACHE MISS",
+        "recomendacoes": recomendacoes
+    }
 
+@app.delete("/recomendacoes/{usuario_id}/cache")
+def deletar_cache_recomendacao(usuario_id: int):
+    cache_key = f"recomendacao:{usuario_id}"
+
+    if not invalidar_cache(cache_key):
+        raise HTTPException(status_code=404, detail="Não havia cache para esse usuário")
+
+    return {"status": "cache invalidado", "usuario_id": usuario_id}
 
 @app.on_event("shutdown")
 def fechar_conexao():
-    driver.close()
+    close_driver()
