@@ -239,7 +239,7 @@ def registrar_avaliacao(registro: Avaliou):
     data_registro = registro.data or date.today().isoformat()
 
     if not (0 <= registro.nota <= 10):
-        raise HTTPException(status_code=400, detail="Nota deve estar entre 0 e 5")
+        raise HTTPException(status_code=400, detail="Nota deve estar entre 0 e 10")
 
     with driver.session() as session:
         resultado = session.run(
@@ -265,25 +265,22 @@ def registrar_avaliacao(registro: Avaliou):
         "filme": registro_criado["filme"],
         "nota": registro_criado["nota"]
     }
+
+
 #--Gerar recomendações de filmes para um usuário com base em avaliações de outros usuários---
 @app.get("/recomendacoes/{usuario_id}")
 def recomendar(usuario_id: int):
     query = """
-    MATCH (u:Usuario {id: $usuario_id})-[r:AVALIOU]->(:Filme)-[:PERTENCE_A]->(g:Genero)
-    WHERE r.nota >= 7
-    WITH u, g, avg(r.nota) AS media
-    ORDER BY media DESC
-    LIMIT 3
-    MATCH (g)<-[:PERTENCE_A]-(rec:Filme)
-    WHERE NOT (u)-[:ASSISTIU]->(rec)
-      AND NOT (u)-[:AVALIOU]->(rec)
-    RETURN rec.id AS id, rec.nome AS nome,
-           collect(DISTINCT g.nome) AS generos,
-           sum(media) AS score
-    ORDER BY score DESC
-    LIMIT 10
+    MATCH (u:Usuario {id: $usuario_id})-[r:AVALIOU]->(f:Filme)
+    WITH u, f, r.nota AS nota
+    ORDER BY nota DESC
+    LIMIT 1
+    MATCH (f)-[:PERTENCE_A]->(g:Genero)
+    MATCH (g)<-[:PERTENCE_A]-(recomendado:Filme)
+    WHERE NOT (u)-[:ASSISTIU]->(recomendado)
+    RETURN recomendado.nome AS titulo, g.nome AS genero, recomendado.ano AS ano
     """
-    with driver.session(database=NEO4J_DATABASE) as session:
+    with driver.session() as session:
         result = session.run(query, usuario_id=usuario_id)
         recomendacoes = [r.data() for r in result]
 
